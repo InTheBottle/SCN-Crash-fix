@@ -1,0 +1,18 @@
+{
+  "name": "shadowscenenodecrashfix",
+  "version-string": "1.0.0",
+  "description": "SKSE plugin that repairs ShadowSceneNode light bookkeeping to stop cell-load crashes.",
+  "license": "MIT",
+  "dependencies": [
+    "directxmath",
+    "directxtk",
+    "fmt",
+    "nlohmann-json",
+    "rapidcsv",
+    "simpleini",
+    "spdlog",
+    "toml11",
+    "xbyak"
+  ],
+  "builtin-baseline": "ee12231b20c95013c6638d845d04c91559a1d1ff"
+}

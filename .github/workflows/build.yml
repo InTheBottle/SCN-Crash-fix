@@ -1,0 +1,49 @@
+name: Build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-cache
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Setup vcpkg
+      run: |
+        mkdir -p ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+        cd $env:VCPKG_INSTALLATION_ROOT
+        ./bootstrap-vcpkg.bat
+        ./vcpkg --version > ${{ github.workspace }}/vcpkg-version.txt
+        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+
+    - name: Cache vcpkg
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}/*
+        key: ${{ runner.os }}-vcpkg-${{ hashFiles('vcpkg.json', 'vcpkg-version.txt') }}
+
+    - name: Configure
+      run: cmake --preset vs2022-windows-vcpkg
+
+    - name: Build
+      run: cmake --build --preset release
+
+    - name: Upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: ShadowSceneNodeCrashFix
+        path: |
+          build/Release/ShadowSceneNodeCrashFix.dll
+          build/Release/ShadowSceneNodeCrashFix.pdb
+          Data/SKSE/Plugins/ShadowSceneNodeCrashFix.ini

@@ -1,0 +1,52 @@
+cmake_minimum_required(VERSION 3.24)
+
+project(
+	ShadowSceneNodeCrashFix
+	VERSION 1.1.0
+	LANGUAGES CXX
+)
+
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+
+list(APPEND CMAKE_IGNORE_PATH "${PROJECT_BINARY_DIR}")
+list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/Tools/SKSE-CMakeModules/Modules")
+include(SKSEPlugin)
+
+set(SKSE_USE_XBYAK OFF)
+set(SKSE_COMMONLIBSSE_PATH "External/CommonLibSSE-NG")
+set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ENABLE_SKYRIM_SE ON CACHE BOOL "" FORCE)
+set(ENABLE_SKYRIM_AE ON CACHE BOOL "" FORCE)
+set(ENABLE_SKYRIM_VR ON CACHE BOOL "" FORCE)
+
+SKSEPlugin_Add(
+	${PROJECT_NAME}
+	SOURCE_DIR src
+	SOURCES
+		README.md
+		vcpkg.json
+		Data/SKSE/Plugins/ShadowSceneNodeCrashFix.ini
+	PRECOMPILE_HEADERS
+		src/PCH.h
+)
+
+target_compile_definitions(
+	${PROJECT_NAME}
+	PRIVATE
+		NOMINMAX
+)
+
+set_target_properties(CommonLibSSE PROPERTIES FOLDER External)
+
+if(DEFINED ENV{SKYRIM_MODS_FOLDER} AND IS_DIRECTORY "$ENV{SKYRIM_MODS_FOLDER}")
+	set(DLL_FOLDER "$ENV{SKYRIM_MODS_FOLDER}/${PROJECT_NAME}/SKSE/Plugins")
+	add_custom_command(
+		TARGET ${PROJECT_NAME}
+		POST_BUILD
+		COMMAND "${CMAKE_COMMAND}" -E make_directory "${DLL_FOLDER}"
+		COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:${PROJECT_NAME}>" "${DLL_FOLDER}/$<TARGET_FILE_NAME:${PROJECT_NAME}>"
+		COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_PDB_FILE:${PROJECT_NAME}>" "${DLL_FOLDER}/$<TARGET_PDB_FILE_NAME:${PROJECT_NAME}>"
+		COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${PROJECT_SOURCE_DIR}/Data/SKSE/Plugins/${PROJECT_NAME}.ini" "${DLL_FOLDER}/${PROJECT_NAME}.ini"
+		VERBATIM
+	)
+endif()
