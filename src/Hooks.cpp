@@ -29,6 +29,7 @@ namespace
 	Counter g_normalRelease;
 	Counter g_staleRelease;
 	Counter g_linkScrub;
+	Counter g_portalUnlinked;
 	Counter g_roomScrubbed;
 	Counter g_sharedNodeScrubbed;
 	Counter g_portalScrubbed;
@@ -348,6 +349,17 @@ namespace
 		return REL::RelocateMember<RE::BSPortal*>(a_node, 0x140, 0x168);
 	}
 
+	RE::BSMultiBoundRoom*& PortalRoom(RE::BSPortal* a_portal, std::size_t a_side)
+	{
+		const auto offset = static_cast<std::ptrdiff_t>(a_side * sizeof(void*));
+		return REL::RelocateMember<RE::BSMultiBoundRoom*>(a_portal, 0x118 + offset, 0x140 + offset);
+	}
+
+	RE::BSPortalSharedNode* PortalSharedNode(RE::BSPortal* a_portal)
+	{
+		return REL::RelocateMember<RE::NiPointer<RE::BSPortalSharedNode>>(a_portal, 0x128, 0x150).get();
+	}
+
 	RE::ShadowSceneNode* SceneNode(std::size_t a_index)
 	{
 		return RE::BSShaderManager::State::GetSingleton().shadowSceneNode[a_index];
@@ -396,7 +408,7 @@ namespace
 				if (!portal) {
 					continue;
 				}
-				if (auto* node = portal->portalSharedNode.get()) {
+				if (auto* node = PortalSharedNode(portal)) {
 					hits += EraseIf(SharedNodeLights(node), a_pred);
 				}
 			}
@@ -526,8 +538,33 @@ namespace
 		}
 	}
 
+	// Neither room-marker unload nor the room destructor clears the room pointers held by
+	// its portals, so a portal that outlives the room leads the room-visibility walk into
+	// freed memory. Null is the engine's own "leads outside" value.
+	std::size_t UnlinkPortalsFrom(RE::BSMultiBoundRoom* a_room)
+	{
+		std::size_t hits = 0;
+		for (auto* item = RoomPortalHead(a_room); item; item = item->next) {
+			auto* portal = item->element;
+			if (!portal || VtableOf(portal) != g_portalVtable) {
+				continue;
+			}
+			for (std::size_t side = 0; side < 2; ++side) {
+				if (auto& room = PortalRoom(portal, side); room == a_room) {
+					room = nullptr;
+					++hits;
+				}
+			}
+		}
+		return hits;
+	}
+
 	void OnRoomDestroyed(RE::BSMultiBoundRoom* a_room)
 	{
+		if (const auto unlinked = UnlinkPortalsFrom(a_room); unlinked && g_portalUnlinked.Log(kNormalLogCap)) {
+			logger::info("BSMultiBoundRoom {:#x} destroyed while {} portal link(s) still pointed at it; links cleared"sv, reinterpret_cast<std::uintptr_t>(a_room), unlinked);
+		}
+
 		const auto scan = [a_room]() {
 			const auto isRoom = [a_room](const void* a_ptr) {
 				return a_ptr == a_room;
@@ -604,7 +641,7 @@ namespace
 
 	void OnPortalDestroyed(RE::BSPortal* a_portal)
 	{
-		auto* node = a_portal->portalSharedNode.get();
+		auto* node = PortalSharedNode(a_portal);
 		if (!node) {
 			return;
 		}
