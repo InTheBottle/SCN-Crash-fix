@@ -765,25 +765,34 @@ namespace
 
 	struct DeferredDestroy
 	{
-		RE::BSLight*  light;
-		std::uint32_t flags;
-		LightDtorFn   dtor;
+		RE::BSLight*     light;
+		std::uint32_t    flags;
+		LightDtorFn      dtor;
+		std::string_view name;
 	};
 
-	std::atomic<std::uint32_t>   g_frameThread{ 0 };
-	std::mutex                   g_destroyLock;
-	std::vector<DeferredDestroy> g_destroyQueue;
+	std::atomic<std::uint32_t>       g_frameThread{ 0 };
+	std::mutex                       g_destroyLock;
+	std::vector<DeferredDestroy>     g_destroyQueue;
+	std::unordered_set<RE::BSLight*> g_destroyPending;
 
 	bool DeferDestroy(RE::BSLight* a_light, std::uint32_t a_flags, LightDtorFn a_dtor, std::string_view a_class)
 	{
-		const auto frameThread = g_frameThread.load(std::memory_order_relaxed);
-		const auto thread = ::GetCurrentThreadId();
-		if (!(a_flags & 1) || frameThread == 0 || frameThread == thread) {
+		if (!(a_flags & 1)) {
 			return false;
 		}
+		const auto frameThread = g_frameThread.load(std::memory_order_relaxed);
+		const auto thread = ::GetCurrentThreadId();
 		{
 			std::scoped_lock guard(g_destroyLock);
-			g_destroyQueue.push_back({ a_light, a_flags, a_dtor });
+			if (g_destroyPending.contains(a_light)) {
+				return true;
+			}
+			if (frameThread == 0 || frameThread == thread) {
+				return false;
+			}
+			g_destroyQueue.push_back({ a_light, a_flags, a_dtor, a_class });
+			g_destroyPending.insert(a_light);
 		}
 		if (g_destroyDeferred.Log(kNormalLogCap)) {
 			logger::info("{} {:#x} released on thread {} while frame thread {} may still draw it; destruction moved to the next frame"sv, a_class, reinterpret_cast<std::uintptr_t>(a_light), thread, frameThread);
@@ -798,17 +807,22 @@ namespace
 			std::scoped_lock guard(g_destroyLock);
 			due.swap(g_destroyQueue);
 		}
-		std::unordered_set<RE::BSLight*> seen;
-		std::size_t                      skipped = 0;
+		std::size_t kept = 0;
 		for (const auto& entry : due) {
-			if (!seen.insert(entry.light).second || entry.light->GetRefCount() != 0) {
-				++skipped;
-				continue;
+			{
+				std::scoped_lock guard(g_destroyLock);
+				if (entry.light->GetRefCount() != 0) {
+					g_destroyQueue.push_back(entry);
+					++kept;
+					continue;
+				}
+				g_destroyPending.erase(entry.light);
 			}
+			OnLightDestroyed(entry.light, entry.name);
 			entry.dtor(entry.light, entry.flags);
 		}
 		if (!due.empty() && g_destroyDrained.Log(kNormalLogCap)) {
-			logger::info("Destroyed {} light(s) released on other threads since the last frame; {} skipped (queued twice or referenced again)"sv, due.size() - skipped, skipped);
+			logger::info("Destroyed {} light(s) released on other threads since the last frame; {} referenced again, kept for the next frame"sv, due.size() - kept, kept);
 		}
 	}
 
@@ -824,10 +838,10 @@ namespace
 
 		static void Dtor(RE::BSLight* a_this, std::uint32_t a_flags)
 		{
-			OnLightDestroyed(a_this, name);
 			if (DeferDestroy(a_this, a_flags, dtor.get(), name)) {
 				return;
 			}
+			OnLightDestroyed(a_this, name);
 			dtor(a_this, a_flags);
 		}
 
