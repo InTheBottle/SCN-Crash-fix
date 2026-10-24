@@ -14,6 +14,8 @@ namespace
 	constexpr std::uint64_t kLogCap = 64;
 	constexpr std::uint64_t kNormalLogCap = 16;
 	constexpr int           kTryLockSpins = 256;
+	constexpr std::uint8_t  kCellLoaded = 3;
+	constexpr std::uint8_t  kCellAttached = 7;
 
 	struct Counter
 	{
@@ -35,6 +37,7 @@ namespace
 	Counter g_portalScrubbed;
 	Counter g_deferred;
 	Counter g_drained;
+	Counter g_queuedAttachSkipped;
 
 	bool        g_drainInstalled = false;
 	std::size_t g_exeSize = 0;
@@ -871,6 +874,27 @@ namespace
 		}
 	};
 
+	struct QueuedAttachGuard
+	{
+		using Fn = void (*)(RE::TES*, RE::TESObjectREFR*, RE::TESObjectCELL*, void*, bool, RE::NiAVObject*);
+
+		static inline REL::Relocation<Fn> original;
+
+		static void Thunk(RE::TES* a_tes, RE::TESObjectREFR* a_ref, RE::TESObjectCELL* a_cell, void* a_task, bool a_flag, RE::NiAVObject* a_3D)
+		{
+			const auto state = a_cell ? a_cell->cellState.underlying() : std::uint8_t{ 0 };
+			if (a_ref && (state < kCellLoaded || state > kCellAttached)) {
+				if (g_queuedAttachSkipped.Log()) {
+					const auto* base = a_ref->GetBaseObject();
+					logger::warn("Skipped attaching background-loaded 3D of {:08X} ({}): its parent cell {} while the model was loading"sv,
+						a_ref->GetFormID(), base ? base->GetName() : "", a_cell ? std::format("{:08X} left the loaded states (state {})", a_cell->GetFormID(), state) : "was cleared"s);
+				}
+				return;
+			}
+			original(a_tes, a_ref, a_cell, a_task, a_flag, a_3D);
+		}
+	};
+
 	template <class Hook>
 	std::size_t PatchCalls(REL::RelocationID a_caller, std::size_t a_scanSize, std::uintptr_t a_target)
 	{
@@ -967,6 +991,16 @@ namespace Hooks
 			logger::info("Deferred cleanup hook installed at {} call site(s)"sv, drainSites);
 		} else {
 			logger::warn("Could not locate the light queue processor call sites; cleanup that cannot run immediately will be skipped"sv);
+		}
+
+		const REL::RelocationID queuedFinish(12880, 13023);
+		const REL::RelocationID queuedAttach(13209, 13355);
+
+		const auto attachSites = PatchCalls<QueuedAttachGuard>(queuedFinish, SizeFor(0x2A6, 0x2E3), queuedAttach.address());
+		if (attachSites == 0) {
+			logger::warn("Could not locate the background 3D attach call; parent cell guard not installed"sv);
+		} else {
+			logger::info("Background 3D parent cell guard installed at {} call site(s)"sv, attachSites);
 		}
 		return true;
 	}
