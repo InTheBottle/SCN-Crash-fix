@@ -38,6 +38,8 @@ namespace
 	Counter g_deferred;
 	Counter g_drained;
 	Counter g_queuedAttachSkipped;
+	Counter g_destroyDeferred;
+	Counter g_destroyDrained;
 
 	bool        g_drainInstalled = false;
 	std::size_t g_exeSize = 0;
@@ -759,10 +761,75 @@ namespace
 		}
 	}
 
+	using LightDtorFn = void (*)(RE::BSLight*, std::uint32_t);
+
+	struct DeferredDestroy
+	{
+		RE::BSLight*     light;
+		std::uint32_t    flags;
+		LightDtorFn      dtor;
+		std::string_view name;
+	};
+
+	std::atomic<std::uint32_t>       g_frameThread{ 0 };
+	std::mutex                       g_destroyLock;
+	std::vector<DeferredDestroy>     g_destroyQueue;
+	std::unordered_set<RE::BSLight*> g_destroyPending;
+
+	bool DeferDestroy(RE::BSLight* a_light, std::uint32_t a_flags, LightDtorFn a_dtor, std::string_view a_class)
+	{
+		if (!(a_flags & 1)) {
+			return false;
+		}
+		const auto frameThread = g_frameThread.load(std::memory_order_relaxed);
+		const auto thread = ::GetCurrentThreadId();
+		{
+			std::scoped_lock guard(g_destroyLock);
+			if (g_destroyPending.contains(a_light)) {
+				return true;
+			}
+			if (frameThread == 0 || frameThread == thread) {
+				return false;
+			}
+			g_destroyQueue.push_back({ a_light, a_flags, a_dtor, a_class });
+			g_destroyPending.insert(a_light);
+		}
+		if (g_destroyDeferred.Log(kNormalLogCap)) {
+			logger::info("{} {:#x} released on thread {} while frame thread {} may still draw it; destruction moved to the next frame"sv, a_class, reinterpret_cast<std::uintptr_t>(a_light), thread, frameThread);
+		}
+		return true;
+	}
+
+	void DestroyDeferred()
+	{
+		std::vector<DeferredDestroy> due;
+		{
+			std::scoped_lock guard(g_destroyLock);
+			due.swap(g_destroyQueue);
+		}
+		std::size_t kept = 0;
+		for (const auto& entry : due) {
+			{
+				std::scoped_lock guard(g_destroyLock);
+				if (entry.light->GetRefCount() != 0) {
+					g_destroyQueue.push_back(entry);
+					++kept;
+					continue;
+				}
+				g_destroyPending.erase(entry.light);
+			}
+			OnLightDestroyed(entry.light, entry.name);
+			entry.dtor(entry.light, entry.flags);
+		}
+		if (!due.empty() && g_destroyDrained.Log(kNormalLogCap)) {
+			logger::info("Destroyed {} light(s) released on other threads since the last frame; {} referenced again, kept for the next frame"sv, due.size() - kept, kept);
+		}
+	}
+
 	template <std::size_t I>
 	struct LightVtbl
 	{
-		using DtorFn = void (*)(RE::BSLight*, std::uint32_t);
+		using DtorFn = LightDtorFn;
 		using SetLightFn = bool (*)(RE::BSLight*, RE::NiLight*);
 
 		static inline REL::Relocation<DtorFn>     dtor;
@@ -771,6 +838,9 @@ namespace
 
 		static void Dtor(RE::BSLight* a_this, std::uint32_t a_flags)
 		{
+			if (DeferDestroy(a_this, a_flags, dtor.get(), name)) {
+				return;
+			}
 			OnLightDestroyed(a_this, name);
 			dtor(a_this, a_flags);
 		}
@@ -859,6 +929,7 @@ namespace
 		}
 	};
 
+	template <bool FrameStart>
 	struct ProcessQueuesHook
 	{
 		using Fn = std::uintptr_t (*)(RE::ShadowSceneNode*, std::uintptr_t);
@@ -867,6 +938,10 @@ namespace
 
 		static std::uintptr_t Thunk(RE::ShadowSceneNode* a_node, std::uintptr_t a_arg)
 		{
+			if constexpr (FrameStart) {
+				g_frameThread.store(::GetCurrentThreadId(), std::memory_order_relaxed);
+				DestroyDeferred();
+			}
 			if (a_node && g_pending.count.load(std::memory_order_acquire)) {
 				Drain(a_node);
 			}
@@ -984,8 +1059,8 @@ namespace Hooks
 		}
 
 		const auto drainSites =
-			PatchCalls<ProcessQueuesHook>(frameWrapper, SizeFor(0x50, 0x4A), processQueues.address()) +
-			PatchCalls<ProcessQueuesHook>(setPortalGraph, SizeFor(0x5A0, 0x547), processQueues.address());
+			PatchCalls<ProcessQueuesHook<true>>(frameWrapper, SizeFor(0x50, 0x4A), processQueues.address()) +
+			PatchCalls<ProcessQueuesHook<false>>(setPortalGraph, SizeFor(0x5A0, 0x547), processQueues.address());
 		g_drainInstalled = drainSites > 0;
 		if (g_drainInstalled) {
 			logger::info("Deferred cleanup hook installed at {} call site(s)"sv, drainSites);
