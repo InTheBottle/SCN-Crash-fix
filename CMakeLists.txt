@@ -23,7 +23,6 @@ SKSEPlugin_Add(
 	${PROJECT_NAME}
 	SOURCE_DIR src
 	SOURCES
-		README.md
 		vcpkg.json
 		Data/SKSE/Plugins/ShadowSceneNodeCrashFix.ini
 	PRECOMPILE_HEADERS
