@@ -574,10 +574,8 @@ namespace
 			};
 			Registry::LightScope scope;
 			std::size_t          hits = 0;
-			for (auto* light : RoomLights(a_room)) {
-				if (scope.Contains(light)) {
-					hits += EraseIf(light->rooms, isRoom);
-				}
+			for (auto* light : scope.All()) {
+				hits += EraseIf(light->rooms, isRoom);
 			}
 			return hits;
 		};
@@ -612,10 +610,7 @@ namespace
 			};
 			Registry::LightScope scope;
 			std::size_t          hits = 0;
-			for (auto* light : SharedNodeLights(a_node)) {
-				if (!scope.Contains(light)) {
-					continue;
-				}
+			for (auto* light : scope.All()) {
 				hits += EraseIf(light->portalSharedNodes, isNode);
 				if (portal) {
 					hits += EraseIf(light->portals, isPortal);
@@ -644,20 +639,14 @@ namespace
 
 	void OnPortalDestroyed(RE::BSPortal* a_portal)
 	{
-		auto* node = PortalSharedNode(a_portal);
-		if (!node) {
-			return;
-		}
-		const auto scan = [a_portal, node]() {
+		const auto scan = [a_portal]() {
 			const auto isPortal = [a_portal](const void* a_ptr) {
 				return a_ptr == a_portal;
 			};
 			Registry::LightScope scope;
 			std::size_t          hits = 0;
-			for (auto* light : SharedNodeLights(node)) {
-				if (scope.Contains(light)) {
-					hits += EraseIf(light->portals, isPortal);
-				}
+			for (auto* light : scope.All()) {
+				hits += EraseIf(light->portals, isPortal);
 			}
 			return hits;
 		};
