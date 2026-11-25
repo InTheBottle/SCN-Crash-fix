@@ -38,6 +38,7 @@ namespace
 	Counter g_deferred;
 	Counter g_drained;
 	Counter g_queuedAttachSkipped;
+	Counter g_staleLightDataSkipped;
 
 	bool        g_drainInstalled = false;
 	std::size_t g_exeSize = 0;
@@ -884,6 +885,29 @@ namespace
 		}
 	};
 
+	// The geometry light refresh checks its shader property's light data, attaches every light in
+	// range, then reads the light data again through a raw pointer. A property released on another
+	// thread in between leaves that second read null or dangling.
+	struct LightDataResetGuard
+	{
+		using Fn = void (*)(RE::BSShaderPropertyLightData*, RE::BSGeometry*);
+
+		static inline REL::Relocation<Fn> original;
+
+		static void Thunk(RE::BSShaderPropertyLightData* a_lightData, RE::BSGeometry* a_geometry)
+		{
+			const auto* property = a_geometry ? a_geometry->GetGeometryRuntimeData().shaderProperty.get() : nullptr;
+			if (a_lightData && property && property->lightData == a_lightData) {
+				original(a_lightData, a_geometry);
+				return;
+			}
+			if (g_staleLightDataSkipped.Log()) {
+				logger::warn("Skipped light list refresh of geometry {:#x} ({}): its shader property was released while lights were being attached"sv,
+					reinterpret_cast<std::uintptr_t>(a_geometry), a_geometry ? a_geometry->name.c_str() : "");
+			}
+		}
+	};
+
 	template <class Hook>
 	std::size_t PatchCalls(REL::RelocationID a_caller, std::size_t a_scanSize, std::uintptr_t a_target)
 	{
@@ -980,6 +1004,20 @@ namespace Hooks
 			logger::info("Deferred cleanup hook installed at {} call site(s)"sv, drainSites);
 		} else {
 			logger::warn("Could not locate the light queue processor call sites; cleanup that cannot run immediately will be skipped"sv);
+		}
+
+		const auto lightDataReset = REL::RelocationID(100996, 107783).address();
+		auto       resetSites =
+			PatchCalls<LightDataResetGuard>(REL::RelocationID(99715, 106352), SizeFor(0x22B, 0x21E), lightDataReset) +
+			PatchCalls<LightDataResetGuard>(REL::RelocationID(99717, 106354), SizeFor(0x8B, 0x88), lightDataReset);
+		// AE inlines the per-geometry refresh (SE 99717) into this recursive child walk.
+		if (REL::Module::IsAE()) {
+			resetSites += PatchCalls<LightDataResetGuard>(REL::RelocationID(0, 106353), 0x1E2, lightDataReset);
+		}
+		if (resetSites == 0) {
+			logger::warn("Could not locate the geometry light data reset calls; stale light data guard not installed"sv);
+		} else {
+			logger::info("Stale light data guard installed at {} call site(s)"sv, resetSites);
 		}
 
 		const REL::RelocationID queuedFinish(12880, 13023);
